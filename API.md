@@ -10,8 +10,7 @@ https://customerportal-api.harmonyencoremdm.com
 
 Returns auth token.
 
-Payload: { "email": "...", "pw": "...", "type": 1, "app":
-"`<app_id>`{=html}", "deviceId": "`<uuid>`{=html}", "osType": 3 }
+Payload: { "email": `"your@e.mail"`, "pw": `"your_secret_password"`, "type": 1, "app": "`long-string-here"`, "deviceId": "`<uuid>`", "osType": 3 }
 
 ## Endpoints
 
