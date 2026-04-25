@@ -1,0 +1,10 @@
+{
+  "domain": "mywateradvisor",
+  "name": "MyWaterAdvisor API pull",
+  "version": "0.1.0",
+  "documentation": "https://github.com/nitrogen76/mywateradvisor-pull",
+  "requirements": [],
+  "codeowners": ["@nitrogen76"],
+  "iot_class": "cloud_polling",
+  "config_flow": true
+}
