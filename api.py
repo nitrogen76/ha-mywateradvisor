@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+# Leo Green <leo@nurgle.net>
+# https://github.com/nitrogen76/ha-mywateradvisor
+
 import requests
 import datetime
 import sys
@@ -7,7 +10,9 @@ import argparse
 import datetime as dt
 import re
 
+
 API_JS_URL = "https://mywateradvisor2.com/static/js/api.js"
+## Fallback to the APP id I know works.
 KNOWN_APP_ID = "3a869241-d476-40f6-a923-d789d63db11d"
 
 _APP_ID_CACHE = None
@@ -155,9 +160,6 @@ def fetch_data(username, password, hours=24):
         combined.values(),
         key=lambda x: dt.datetime.fromisoformat(x["dateTime"])
     )
-
-
-    # ---- process data (UNCHANGED from your script) ----
 
     working = data
 

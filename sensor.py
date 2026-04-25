@@ -63,7 +63,7 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
 
             restored_ts = last_state.attributes.get("last_timestamp")
 
-            # 🔥 only restore if we actually have one
+            # only restore if we actually have one
             if restored_ts:
                 self._last_timestamp = restored_ts
 
@@ -101,7 +101,7 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
         # sort oldest → newest
         entries = sorted(entries, key=lambda x: x["time_raw"])
 
-        # 🔥 FIRST RUN: baseline only (NO additions)
+        # FIRST RUN: baseline only (NO additions)
         if self._last_timestamp is None:
             if entries:
                 self._last_timestamp = entries[-1]["time_raw"]
@@ -144,7 +144,7 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
                     self._total,
                 )
 
-                # 🔥 advance cursor immediately
+                # advance cursor immediately
                 self._last_timestamp = ts_str
 
     async def async_update(self):

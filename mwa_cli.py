@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+# Leo Green <leo@nurgle.net>
+# https://github.com/nitrogen76/ha-mywateradvisor
+
 import argparse
 import json
 from api import fetch_data
