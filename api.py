@@ -10,6 +10,10 @@ import argparse
 import datetime as dt
 import re
 
+## Bastards fixed the time_raw so now i think its local
+
+TIME_RAW_MODE = "local"   # options: "utc", "local"
+
 
 API_JS_URL = "https://mywateradvisor2.com/static/js/api.js"
 ## Fallback to the APP id I know works.
@@ -63,12 +67,18 @@ import uuid
 def convert_timestamp(ts_str):
     ts = dt.datetime.fromisoformat(ts_str)
 
-    # assume backend is UTC (based on your testing)
-    ts_utc = ts.replace(tzinfo=dt.timezone.utc)
-    ts_local = ts_utc.astimezone()
+    if TIME_RAW_MODE == "utc":
+        ts_utc = ts.replace(tzinfo=dt.timezone.utc)
+        ts_local = ts_utc.astimezone()
+
+    elif TIME_RAW_MODE == "local":
+        ts_local = ts.astimezone() if ts.tzinfo else ts.replace(tzinfo=None).astimezone()
+        ts_utc = ts_local.astimezone(dt.timezone.utc)
+
+    else:
+        raise ValueError(f"Invalid TIME_RAW_MODE: {TIME_RAW_MODE}")
 
     return ts_utc, ts_local
-
 
 def login(username, password, debug=False):
     app_id = get_app_id(debug=debug)
