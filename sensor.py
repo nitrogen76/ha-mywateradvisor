@@ -103,7 +103,7 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
         # FIRST RUN: baseline only (NO additions)
         if self._last_timestamp is None:
             if entries:
-                self._last_timestamp = entries[-1]["time_raw"]
+                self._last_timestamp = entries[-1]["dateTime"]
                 _LOGGER.warning(
                     "MWA INIT: baseline set to %s",
                     self._last_timestamp,
