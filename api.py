@@ -145,98 +145,74 @@ def get_usage(token, meter_id, date, debug=False):
     resp.raise_for_status()
     return resp.json()
 
-def fetch_data(username, password, hours=24):
+
+ 
+import datetime as dt
+
+
+def fetch_data(username, password, hours=48, debug=False, include_estimated=False):
     token = login(username, password)
     meter_id = get_meter_id(token)
 
-    now_utc = dt.datetime.now(dt.timezone.utc)
+    now_utc = dt.datetime.utcnow()
 
-    today_utc = now_utc.date()
-    yesterday_utc = today_utc - dt.timedelta(days=1)
+    # --- STEP 1: determine how many days to fetch ---
+    days_needed = (hours // 24) + 2  # buffer so we never miss edge hours
 
-    data_yesterday = get_usage(token, meter_id, yesterday_utc.isoformat())
-    data_today = get_usage(token, meter_id, today_utc.isoformat())
-
-# merge safely (no overwriting loss)
-    combined = {}
-
-    for entry in data_yesterday:
-        combined[entry["dateTime"]] = entry
-
-    for entry in data_today:
-        combined[entry["dateTime"]] = entry
-
-    data = sorted(
-        combined.values(),
-        key=lambda x: dt.datetime.fromisoformat(x["dateTime"])
-    )
-
-    working = data
-
-    deduped = {}
-    for entry in working:
-        deduped[entry["dateTime"]] = entry
-
-    sorted_entries = sorted(
-        deduped.values(),
-        key=lambda x: dt.datetime.fromisoformat(x["dateTime"])
-    )
-
-    all_entries = sorted_entries
-
-    real_entries = [
-        x for x in all_entries
-        if x["estimationType"] == 0
+    dates = [
+        (now_utc.date() - dt.timedelta(days=i)).isoformat()
+        for i in range(days_needed)
     ]
 
-    latest_real = next(
-        (x for x in reversed(all_entries) if x["estimationType"] == 0),
-        None
-    )
+    if debug:
+        print(f"[DEBUG] Fetching dates: {dates}")
 
-    if latest_real:
-        idx = all_entries.index(latest_real)
-        recent_entries = all_entries[max(0, idx - hours + 1): idx + 1]
-    else:
-        recent_entries = []
+    # --- STEP 2: fetch + merge ---
+    combined = {}
 
-    recent_entries = sorted(
-        recent_entries,
-        key=lambda x: dt.datetime.fromisoformat(x["dateTime"])
-    )
+    for d in dates:
+        data = get_usage(token, meter_id, d)
 
-    recent = []
-    for x in recent_entries:
-        ts_utc, ts_local = convert_timestamp(x["dateTime"])
+        if debug:
+            print(f"[DEBUG] {d}: {len(data)} entries")
 
-        recent.append({
-            "time_raw": x["dateTime"],
-            "time_local": ts_local.isoformat(),
-            "cons": x["cons"],
-            "estimated": x["estimationType"] != 0
-        })
+        local_tz = dt.datetime.now().astimezone().tzinfo
 
-    total = sum(x["cons"] for x in real_entries)
-    max_hour = max((x["cons"] for x in real_entries), default=0)
+        for entry in data:
+    # --- normalize fields ---
+            entry["cons"] = entry.get("cons", 0.0)
+            entry["estimated"] = entry.get("estimationType", 0) != 0
 
-    latest_entry = real_entries[-1] if real_entries else None
+    # --- handle time ---
+            ts = dt.datetime.fromisoformat(entry["dateTime"].replace("Z", "+00:00"))
+            ts_local = ts.astimezone(local_tz)
 
-    latest = latest_entry["cons"] if latest_entry else 0
+            entry["time_local"] = ts_local.strftime("%Y-%m-%d %H:%M")
 
-    if latest_entry:
-        _, latest_local = convert_timestamp(latest_entry["dateTime"])
-        latest_time = latest_local.isoformat()
-        latest_raw = latest_entry["dateTime"]
-    else:
-        latest_time = None
-        latest_raw = None
+            combined[entry["dateTime"]] = entry
 
-    return {
-        "total_gallons": round(total, 2),
-        "current_hour": round(latest, 2),
-        "max_hour": round(max_hour, 2),
-        "entries": len(all_entries),
-        "last_timestamp_raw": latest_raw,
-        "last_timestamp_local": latest_time,
-        "recent": recent
-    }
+
+    # sort everything
+    all_entries = sorted(combined.values(), key=lambda x: x["dateTime"])
+
+    if debug:
+        print(f"[DEBUG] Total merged entries: {len(all_entries)}")
+
+    # --- STEP 3: filter by time window ---
+    cutoff = now_utc - dt.timedelta(hours=hours)
+
+    recent_entries = [
+        x for x in all_entries
+        if dt.datetime.fromisoformat(x["dateTime"]) >= cutoff
+    ]
+
+    if not include_estimated:
+        	recent_entries = [x for x in recent_entries if not x["estimated"]]
+
+    if debug:
+        print(f"[DEBUG] Returning {len(recent_entries)} entries")
+        if recent_entries:
+            print(f"[DEBUG] Oldest: {recent_entries[0]['dateTime']}")
+            print(f"[DEBUG] Newest: {recent_entries[-1]['dateTime']}")
+
+    return recent_entries

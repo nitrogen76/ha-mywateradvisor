@@ -13,14 +13,25 @@ def main():
     parser.add_argument("username")
     parser.add_argument("password")
     parser.add_argument("--pretty", action="store_true")
-    parser.add_argument("--recent", action="store_true")
+    parser.add_argument("--formatted", action="store_true")
+    parser.add_argument("--include-estimated", action="store_true")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--hours", type=int, default=48)
 
     args = parser.parse_args()
 
-    data = fetch_data(args.username, args.password)
+    data = fetch_data(args.username, 
+        args.password,
+        hours=args.hours,
+        include_estimated=args.include_estimated,
+        debug=args.debug
+        )
 
-    if args.recent:
-        for entry in data["recent"]:
+    if args.formatted:
+        for entry in data:
+            if not args.include_estimated and entry["estimated"]:
+                continue
+
             status = "EST" if entry["estimated"] else "REAL"
             print(f'{entry["time_local"]}  {entry["cons"]:.2f} gal  {status}')
         return
