@@ -24,8 +24,8 @@ class MWADebugSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self):
-        data = self.coordinator.data or {}
-        return len(entries)
+        data = self.coordinator.data or []
+        return len(data)
 
     @property
     def extra_state_attributes(self):
