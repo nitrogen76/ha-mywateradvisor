@@ -25,13 +25,12 @@ class MWADebugSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         data = self.coordinator.data or {}
-        entries = data.get("recent", [])
         return len(entries)
 
     @property
     def extra_state_attributes(self):
         return {
-            "entries": self.coordinator.data.get("recent", [])
+            "entries": self.coordinator.data or []
         }
 
 
@@ -93,13 +92,13 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
         if not data:
             return
 
-        entries = data.get("recent", [])
+        entries = data or []
 
         # filter real entries only
         entries = [e for e in entries if not e.get("estimated")]
 
         # sort oldest → newest
-        entries = sorted(entries, key=lambda x: x["time_raw"])
+        entries = sorted(entries, key=lambda x: x["dateTime"])
 
         # FIRST RUN: baseline only (NO additions)
         if self._last_timestamp is None:
@@ -115,7 +114,7 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
         from datetime import datetime
 
         for entry in entries:
-            ts_str = entry["time_raw"]
+            ts_str = entry["dateTime"]
             ts = datetime.fromisoformat(ts_str)
             last_ts = datetime.fromisoformat(self._last_timestamp)
 
