@@ -12,7 +12,7 @@ import re
 
 ## Bastards fixed the time_raw so now i think its local
 
-TIME_RAW_MODE = "local"   # options: "utc", "local"
+TIME_RAW_MODE = "utc"   # options: "utc", "local"
 
 
 API_JS_URL = "https://mywateradvisor2.com/static/js/api.js"
