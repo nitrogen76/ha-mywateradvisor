@@ -154,7 +154,7 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
     token = login(username, password)
     meter_id = get_meter_id(token)
 
-    now_utc = dt.datetime.utcnow()
+    now_utc = dt.datetime.now(dt.timezone.utc)
 
     # --- STEP 1: determine how many days to fetch ---
     days_needed = (hours // 24) + 2  # buffer so we never miss edge hours
@@ -184,13 +184,25 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
             entry["estimated"] = entry.get("estimationType", 0) != 0
 
     # --- handle time ---
-            ts = dt.datetime.fromisoformat(entry["dateTime"].replace("Z", "+00:00"))
+            raw = entry["dateTime"]
+
+            ts = dt.datetime.fromisoformat(raw)
+
+            if TIME_RAW_MODE == "utc":
+                ts = ts.replace(tzinfo=dt.timezone.utc)
+            elif TIME_RAW_MODE == "local":
+                ts = ts.replace(tzinfo=local_tz)
+            else:
+                raise ValueError(f"Invalid TIME_RAW_MODE: {TIME_RAW_MODE}")
+
             ts_local = ts.astimezone(local_tz)
 
             entry["time_local"] = ts_local.strftime("%Y-%m-%d %H:%M")
 
-            combined[entry["dateTime"]] = entry
-
+    # store normalized timestamps
+            entry["_ts"] = ts
+            entry["_ts_utc"] = ts.astimezone(dt.timezone.utc)
+            combined[entry["_ts_utc"].isoformat()] = entry
 
     # sort everything
     all_entries = sorted(combined.values(), key=lambda x: x["dateTime"])
@@ -203,7 +215,7 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
 
     recent_entries = [
         x for x in all_entries
-        if dt.datetime.fromisoformat(x["dateTime"]) >= cutoff
+        if x["_ts_utc"] >= cutoff
     ]
 
     if not include_estimated:
@@ -214,5 +226,8 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
         if recent_entries:
             print(f"[DEBUG] Oldest: {recent_entries[0]['dateTime']}")
             print(f"[DEBUG] Newest: {recent_entries[-1]['dateTime']}")
-
+## remove garbage
+    for x in recent_entries:
+        x.pop("_ts", None)
+        x.pop("_ts_utc", None)
     return recent_entries
