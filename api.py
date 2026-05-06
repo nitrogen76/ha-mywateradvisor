@@ -9,17 +9,29 @@ import sys
 import argparse
 import datetime as dt
 import re
+import json
+from pathlib import Path
 
-## Bastards fixed the time_raw so now i think its local
 
+# in case your implementation isn't broken
 TIME_RAW_MODE = "utc"   # options: "utc", "local"
 
 
 API_JS_URL = "https://mywateradvisor2.com/static/js/api.js"
 ## Fallback to the APP id I know works.
 KNOWN_APP_ID = "3a869241-d476-40f6-a923-d789d63db11d"
-
+TOKEN_CACHE_FILE = Path.home() / ".mywateradvisor_token_cache.json"
 _APP_ID_CACHE = None
+
+# Store the login cache token in a space place for a homeassistant use
+# otherwise just in the CWD for my testing off of it.
+
+HA_STORAGE_DIR = Path("/config/.storage")
+if HA_STORAGE_DIR.exists():
+    TOKEN_CACHE_FILE = HA_STORAGE_DIR / "mywateradvisor_tokens.json"
+else:
+    TOKEN_CACHE_FILE = Path.cwd() / "mywateradvisor_tokens.json"
+
 
 ## Get the app id.  It SHOULD be static, but i trust NOTHING.
 def fetch_app_id(debug=False):
@@ -80,7 +92,65 @@ def convert_timestamp(ts_str):
 
     return ts_utc, ts_local
 
-def login(username, password, debug=False):
+def load_cached_token(username, debug=False):
+    try:
+        if not TOKEN_CACHE_FILE.exists():
+            return None
+
+        data = json.loads(TOKEN_CACHE_FILE.read_text())
+
+        token = data.get(username)
+
+        if debug and token:
+            print(f"[DEBUG] Using cached token for {username}")
+
+        return token
+
+    except Exception as e:
+        if debug:
+            print(f"[DEBUG] Failed reading token cache: {e}")
+
+    return None
+
+
+def save_cached_token(username, token, debug=False):
+    try:
+        data = {}
+
+        if TOKEN_CACHE_FILE.exists():
+            data = json.loads(TOKEN_CACHE_FILE.read_text())
+
+        data[username] = token
+
+        TOKEN_CACHE_FILE.write_text(json.dumps(data, indent=2))
+
+        if debug:
+            print(f"[DEBUG] Saved token cache for {username}")
+
+    except Exception as e:
+        if debug:
+            print(f"[DEBUG] Failed saving token cache: {e}")
+
+
+def clear_cached_token(username, debug=False):
+    try:
+        if not TOKEN_CACHE_FILE.exists():
+            return
+
+        data = json.loads(TOKEN_CACHE_FILE.read_text())
+
+        if username in data:
+            del data[username]
+            TOKEN_CACHE_FILE.write_text(json.dumps(data, indent=2))
+
+            if debug:
+                print(f"[DEBUG] Cleared cached token for {username}")
+
+    except Exception as e:
+        if debug:
+            print(f"[DEBUG] Failed clearing token cache: {e}")
+
+def perform_login(username, password, debug=False):
     app_id = get_app_id(debug=debug)
 
     resp = requests.post(
@@ -107,7 +177,19 @@ def login(username, password, debug=False):
         print("LOGIN BODY:", resp.text)
 
     resp.raise_for_status()
-    return resp.json()["token"]
+    token = resp.json()["token"]
+    save_cached_token(username, token, debug=debug)
+
+    return token
+
+def login(username, password, debug=False, force_refresh=False):
+    if not force_refresh:
+        cached = load_cached_token(username, debug=debug)
+
+        if cached:
+            return cached
+
+    return perform_login(username, password, debug=debug)
 
 def get_meter_id(token, debug=False):
     resp = requests.get(
@@ -151,13 +233,37 @@ import datetime as dt
 
 
 def fetch_data(username, password, hours=48, debug=False, include_estimated=False):
-    token = login(username, password)
-    meter_id = get_meter_id(token)
+
+    token = login(username, password, debug=debug)
+
+    try:
+        meter_id = get_meter_id(token, debug=debug)
+
+    except requests.HTTPError as e:
+        status = getattr(e.response, "status_code", None)
+
+        if status in (401, 403):
+            if debug:
+                print("[DEBUG] Cached token expired, re-authenticating")
+
+            clear_cached_token(username, debug=debug)
+
+            token = login(
+                username,
+                password,
+                debug=debug,
+                force_refresh=True,
+            )
+
+            meter_id = get_meter_id(token, debug=debug)
+
+        else:
+            raise
 
     now_utc = dt.datetime.now(dt.timezone.utc)
 
     # --- STEP 1: determine how many days to fetch ---
-    days_needed = (hours // 24) + 2  # buffer so we never miss edge hours
+    days_needed = (hours // 24) + 2
 
     dates = [
         (now_utc.date() - dt.timedelta(days=i)).isoformat()
@@ -167,7 +273,6 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
     if debug:
         print(f"[DEBUG] Fetching dates: {dates}")
 
-    # --- STEP 2: fetch + merge ---
     combined = {}
 
     for d in dates:
@@ -179,11 +284,9 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
         local_tz = dt.datetime.now().astimezone().tzinfo
 
         for entry in data:
-    # --- normalize fields ---
             entry["cons"] = entry.get("cons", 0.0)
             entry["estimated"] = entry.get("estimationType", 0) != 0
 
-    # --- handle time ---
             raw = entry["dateTime"]
 
             ts = dt.datetime.fromisoformat(raw)
@@ -199,18 +302,16 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
 
             entry["time_local"] = ts_local.strftime("%Y-%m-%d %H:%M")
 
-    # store normalized timestamps
             entry["_ts"] = ts
             entry["_ts_utc"] = ts.astimezone(dt.timezone.utc)
+
             combined[entry["_ts_utc"].isoformat()] = entry
 
-    # sort everything
     all_entries = sorted(combined.values(), key=lambda x: x["dateTime"])
 
     if debug:
         print(f"[DEBUG] Total merged entries: {len(all_entries)}")
 
-    # --- STEP 3: filter by time window ---
     cutoff = now_utc - dt.timedelta(hours=hours)
 
     recent_entries = [
@@ -219,15 +320,20 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
     ]
 
     if not include_estimated:
-        	recent_entries = [x for x in recent_entries if not x["estimated"]]
+        recent_entries = [
+            x for x in recent_entries
+            if not x["estimated"]
+        ]
 
     if debug:
         print(f"[DEBUG] Returning {len(recent_entries)} entries")
+
         if recent_entries:
             print(f"[DEBUG] Oldest: {recent_entries[0]['dateTime']}")
             print(f"[DEBUG] Newest: {recent_entries[-1]['dateTime']}")
-## remove garbage
+
     for x in recent_entries:
         x.pop("_ts", None)
         x.pop("_ts_utc", None)
+
     return recent_entries
