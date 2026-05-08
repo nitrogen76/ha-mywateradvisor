@@ -268,12 +268,13 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
     meter_id = call_with_token_retry(get_meter_id)
 
     now_utc = dt.datetime.now(dt.timezone.utc)
+    local_tz = dt.datetime.now().astimezone().tzinfo
 
     # --- STEP 1: determine how many days to fetch ---
     days_needed = (hours // 24) + 2
 
     dates = [
-        (now_utc.date() - dt.timedelta(days=i)).isoformat()
+        (now_utc.date() + dt.timedelta(days=1) - dt.timedelta(days=i)).isoformat()
         for i in range(days_needed)
     ]
 
@@ -287,8 +288,6 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
 
         if debug:
             print(f"[DEBUG] {d}: {len(data)} entries")
-
-        local_tz = dt.datetime.now().astimezone().tzinfo
 
         for entry in data:
             entry["cons"] = entry.get("cons", 0.0)
@@ -323,7 +322,7 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
 
     recent_entries = [
         x for x in all_entries
-        if x["_ts_utc"] >= cutoff
+        if cutoff <= x["_ts_utc"] <= now_utc
     ]
 
     if not include_estimated:
