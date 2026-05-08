@@ -31,7 +31,7 @@ async def async_setup_entry(hass, entry):
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    # 🔥 This connects sensor.py
+    # This connects sensor.py
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
 
     return True

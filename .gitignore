@@ -1,3 +1,33 @@
+# Project specific things:
+*mywateradvisor_tokens.json
+
+### OSX junk
+# macOS Finder metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+# Icon must end with two \r
+Icon
+# Thumbnails
+._*
+
+# Files that might appear in external disks
+.Spotlight-V100
+.Trashes
+
+# macOS volume metadata
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+
+# AFP share crap
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
