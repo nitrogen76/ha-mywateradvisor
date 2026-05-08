@@ -228,6 +228,11 @@ def get_usage(token, meter_id, date, debug=False):
     return resp.json()
 
 
+def is_auth_error(error):
+    status = getattr(error.response, "status_code", None)
+    return status in (401, 403)
+
+
  
 import datetime as dt
 
@@ -236,29 +241,31 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
 
     token = login(username, password, debug=debug)
 
-    try:
-        meter_id = get_meter_id(token, debug=debug)
+    def refresh_token():
+        if debug:
+            print("[DEBUG] Cached token expired, re-authenticating")
 
-    except requests.HTTPError as e:
-        status = getattr(e.response, "status_code", None)
+        clear_cached_token(username, debug=debug)
+        return login(
+            username,
+            password,
+            debug=debug,
+            force_refresh=True,
+        )
 
-        if status in (401, 403):
-            if debug:
-                print("[DEBUG] Cached token expired, re-authenticating")
+    def call_with_token_retry(func, *args):
+        nonlocal token
 
-            clear_cached_token(username, debug=debug)
+        try:
+            return func(token, *args, debug=debug)
+        except requests.HTTPError as e:
+            if not is_auth_error(e):
+                raise
 
-            token = login(
-                username,
-                password,
-                debug=debug,
-                force_refresh=True,
-            )
+            token = refresh_token()
+            return func(token, *args, debug=debug)
 
-            meter_id = get_meter_id(token, debug=debug)
-
-        else:
-            raise
+    meter_id = call_with_token_retry(get_meter_id)
 
     now_utc = dt.datetime.now(dt.timezone.utc)
 
@@ -276,7 +283,7 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
     combined = {}
 
     for d in dates:
-        data = get_usage(token, meter_id, d)
+        data = call_with_token_retry(get_usage, meter_id, d)
 
         if debug:
             print(f"[DEBUG] {d}: {len(data)} entries")
@@ -307,7 +314,7 @@ def fetch_data(username, password, hours=48, debug=False, include_estimated=Fals
 
             combined[entry["_ts_utc"].isoformat()] = entry
 
-    all_entries = sorted(combined.values(), key=lambda x: x["dateTime"])
+    all_entries = sorted(combined.values(), key=lambda x: x["_ts_utc"])
 
     if debug:
         print(f"[DEBUG] Total merged entries: {len(all_entries)}")

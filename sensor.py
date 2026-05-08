@@ -8,13 +8,20 @@ from homeassistant.helpers.restore_state import RestoreEntity
 import logging
 
 _LOGGER = logging.getLogger(__name__)
+CONF_ENABLE_DEBUG_SENSOR = "enable_debug_sensor"
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data["mywateradvisor"][entry.entry_id]
-    async_add_entities([MWAEnergyTotalSensor(coordinator),
-						MWADebugSensor(coordinator),
-	], True)
+    entities = [MWAEnergyTotalSensor(coordinator)]
+
+    if entry.options.get(
+        CONF_ENABLE_DEBUG_SENSOR,
+        entry.data.get(CONF_ENABLE_DEBUG_SENSOR, False),
+    ):
+        entities.append(MWADebugSensor(coordinator))
+
+    async_add_entities(entities, True)
 
 class MWADebugSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator):
