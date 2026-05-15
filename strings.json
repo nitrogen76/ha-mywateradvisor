@@ -1,0 +1,34 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "enable_debug_sensor": "Enable debug sensor",
+          "max_reasonable_hourly_cons": "Maximum reasonable hourly usage",
+          "skip_negative_corrections": "Skip negative corrections"
+        },
+        "data_description": {
+          "max_reasonable_hourly_cons": "Hourly usage above this many gallons will be skipped by the total sensor. Use 0 to disable this guard.",
+          "skip_negative_corrections": "Skip negative correction rows before they reach the total sensor."
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "enable_debug_sensor": "Enable debug sensor",
+          "max_reasonable_hourly_cons": "Maximum reasonable hourly usage",
+          "skip_negative_corrections": "Skip negative corrections"
+        },
+        "data_description": {
+          "max_reasonable_hourly_cons": "Hourly usage above this many gallons will be skipped by the total sensor. Use 0 to disable this guard.",
+          "skip_negative_corrections": "Skip negative correction rows before they reach the total sensor."
+        }
+      }
+    }
+  }
+}

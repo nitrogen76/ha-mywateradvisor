@@ -4,17 +4,17 @@
 # https://github.com/nitrogen76/ha-mywateradvisor
 
 import requests
-import datetime
-import sys
-import argparse
 import datetime as dt
 import re
 import json
+import uuid
 from pathlib import Path
 
 
 # in case your implementation isn't broken
 TIME_RAW_MODE = "utc"   # options: "utc", "local"
+MAX_REASONABLE_HOURLY_CONS = 2000
+MAX_REASONABLE_DAILY_CONS = 10000
 
 
 API_JS_URL = "https://mywateradvisor2.com/static/js/api.js"
@@ -73,8 +73,6 @@ def get_app_id(debug=False):
     return _APP_ID_CACHE
 
 BASE_URL = "https://customerportal-api.harmonyencoremdm.com"
-
-import uuid
 
 def convert_timestamp(ts_str):
     ts = dt.datetime.fromisoformat(ts_str)
@@ -228,118 +226,254 @@ def get_usage(token, meter_id, date, debug=False):
     return resp.json()
 
 
+def format_consumption_date(value):
+    if isinstance(value, dt.datetime):
+        value = value.date()
+
+    if isinstance(value, dt.date):
+        return value.strftime("%m-%d-%Y")
+
+    if isinstance(value, str):
+        for fmt in ("%m-%d-%Y", "%Y-%m-%d"):
+            try:
+                return dt.datetime.strptime(value, fmt).strftime("%m-%d-%Y")
+            except ValueError:
+                pass
+
+        return value
+
+    raise TypeError(f"Unsupported date value: {value!r}")
+
+
+def get_daily_usage(token, meter_id, start_date, end_date, debug=False):
+    start = format_consumption_date(start_date)
+    end = format_consumption_date(end_date)
+    url = f"{BASE_URL}/consumption/daily/{meter_id}/{start}/{end}"
+
+    resp = requests.get(
+        url,
+        headers={
+            "Accept": "application/json",
+            "x-access-token": token,
+        },
+        timeout=10,
+    )
+
+    if debug:
+        print("DAILY USAGE STATUS:", resp.status_code)
+        print("DAILY USAGE BODY:", resp.text)
+
+    resp.raise_for_status()
+    return resp.json()
+
+
+def classify_consumption(cons, max_reasonable):
+    if cons < 0:
+        return "negative_correction"
+
+    if cons > max_reasonable:
+        return "high_outlier"
+
+    return None
+
+
+def normalize_hourly_entry(entry):
+    normalized = dict(entry)
+    normalized["cons"] = normalized.get("cons", 0.0)
+    normalized["estimated"] = normalized.get("estimationType", 0) != 0
+
+    anomaly = classify_consumption(
+        float(normalized.get("cons", 0) or 0),
+        MAX_REASONABLE_HOURLY_CONS,
+    )
+    normalized["anomaly"] = anomaly is not None
+
+    if anomaly:
+        normalized["anomaly_reason"] = anomaly
+
+    return normalized
+
+
+def normalize_daily_entry(entry):
+    normalized = dict(entry)
+    normalized["cons"] = normalized.get("cons", 0.0)
+    normalized["estimated"] = normalized.get("estimationType", 0) != 0
+
+    anomaly = classify_consumption(
+        float(normalized.get("cons", 0) or 0),
+        MAX_REASONABLE_DAILY_CONS,
+    )
+    normalized["anomaly"] = anomaly is not None
+
+    if anomaly:
+        normalized["anomaly_reason"] = anomaly
+
+    raw = normalized.get("consDate")
+    if raw:
+        ts = dt.datetime.fromisoformat(raw)
+        normalized["date"] = ts.date().isoformat()
+
+    return normalized
+
+
 def is_auth_error(error):
     status = getattr(error.response, "status_code", None)
     return status in (401, 403)
 
 
- 
-import datetime as dt
+class MyWaterAdvisorApi:
+    def __init__(self, username, password, debug=False):
+        self.username = username
+        self.password = password
+        self.debug = debug
+        self.token = login(username, password, debug=debug)
+        self._meter_id = None
 
-
-def fetch_data(username, password, hours=48, debug=False, include_estimated=False):
-
-    token = login(username, password, debug=debug)
-
-    def refresh_token():
-        if debug:
+    def refresh_token(self):
+        if self.debug:
             print("[DEBUG] Cached token expired, re-authenticating")
 
-        clear_cached_token(username, debug=debug)
-        return login(
-            username,
-            password,
-            debug=debug,
+        clear_cached_token(self.username, debug=self.debug)
+        self.token = login(
+            self.username,
+            self.password,
+            debug=self.debug,
             force_refresh=True,
         )
 
-    def call_with_token_retry(func, *args):
-        nonlocal token
-
+    def call_with_token_retry(self, func, *args):
         try:
-            return func(token, *args, debug=debug)
+            return func(self.token, *args, debug=self.debug)
         except requests.HTTPError as e:
             if not is_auth_error(e):
                 raise
 
-            token = refresh_token()
-            return func(token, *args, debug=debug)
+            self.refresh_token()
+            return func(self.token, *args, debug=self.debug)
 
-    meter_id = call_with_token_retry(get_meter_id)
+    @property
+    def meter_id(self):
+        if self._meter_id is None:
+            self._meter_id = self.call_with_token_retry(get_meter_id)
 
-    now_utc = dt.datetime.now(dt.timezone.utc)
-    local_tz = dt.datetime.now().astimezone().tzinfo
+        return self._meter_id
 
-    # --- STEP 1: determine how many days to fetch ---
-    days_needed = (hours // 24) + 2
+    def fetch_hourly_data(self, hours=48, include_estimated=False):
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        local_tz = dt.datetime.now().astimezone().tzinfo
 
-    dates = [
-        (now_utc.date() + dt.timedelta(days=1) - dt.timedelta(days=i)).isoformat()
-        for i in range(days_needed)
-    ]
+        # --- STEP 1: determine how many days to fetch ---
+        days_needed = (hours // 24) + 2
 
-    if debug:
-        print(f"[DEBUG] Fetching dates: {dates}")
-
-    combined = {}
-
-    for d in dates:
-        data = call_with_token_retry(get_usage, meter_id, d)
-
-        if debug:
-            print(f"[DEBUG] {d}: {len(data)} entries")
-
-        for entry in data:
-            entry["cons"] = entry.get("cons", 0.0)
-            entry["estimated"] = entry.get("estimationType", 0) != 0
-
-            raw = entry["dateTime"]
-
-            ts = dt.datetime.fromisoformat(raw)
-
-            if TIME_RAW_MODE == "utc":
-                ts = ts.replace(tzinfo=dt.timezone.utc)
-            elif TIME_RAW_MODE == "local":
-                ts = ts.replace(tzinfo=local_tz)
-            else:
-                raise ValueError(f"Invalid TIME_RAW_MODE: {TIME_RAW_MODE}")
-
-            ts_local = ts.astimezone(local_tz)
-
-            entry["time_local"] = ts_local.strftime("%Y-%m-%d %H:%M")
-
-            entry["_ts"] = ts
-            entry["_ts_utc"] = ts.astimezone(dt.timezone.utc)
-
-            combined[entry["_ts_utc"].isoformat()] = entry
-
-    all_entries = sorted(combined.values(), key=lambda x: x["_ts_utc"])
-
-    if debug:
-        print(f"[DEBUG] Total merged entries: {len(all_entries)}")
-
-    cutoff = now_utc - dt.timedelta(hours=hours)
-
-    recent_entries = [
-        x for x in all_entries
-        if cutoff <= x["_ts_utc"] <= now_utc
-    ]
-
-    if not include_estimated:
-        recent_entries = [
-            x for x in recent_entries
-            if not x["estimated"]
+        dates = [
+            (now_utc.date() + dt.timedelta(days=1) - dt.timedelta(days=i)).isoformat()
+            for i in range(days_needed)
         ]
 
-    if debug:
-        print(f"[DEBUG] Returning {len(recent_entries)} entries")
+        if self.debug:
+            print(f"[DEBUG] Fetching dates: {dates}")
 
-        if recent_entries:
-            print(f"[DEBUG] Oldest: {recent_entries[0]['dateTime']}")
-            print(f"[DEBUG] Newest: {recent_entries[-1]['dateTime']}")
+        combined = {}
 
-    for x in recent_entries:
-        x.pop("_ts", None)
-        x.pop("_ts_utc", None)
+        for d in dates:
+            data = self.call_with_token_retry(get_usage, self.meter_id, d)
 
-    return recent_entries
+            if self.debug:
+                print(f"[DEBUG] {d}: {len(data)} entries")
+
+            for raw_entry in data:
+                entry = normalize_hourly_entry(raw_entry)
+
+                raw = entry["dateTime"]
+
+                ts = dt.datetime.fromisoformat(raw)
+
+                if TIME_RAW_MODE == "utc":
+                    ts = ts.replace(tzinfo=dt.timezone.utc)
+                elif TIME_RAW_MODE == "local":
+                    ts = ts.replace(tzinfo=local_tz)
+                else:
+                    raise ValueError(f"Invalid TIME_RAW_MODE: {TIME_RAW_MODE}")
+
+                ts_local = ts.astimezone(local_tz)
+
+                entry["time_local"] = ts_local.strftime("%Y-%m-%d %H:%M")
+
+                entry["_ts"] = ts
+                entry["_ts_utc"] = ts.astimezone(dt.timezone.utc)
+
+                combined[entry["_ts_utc"].isoformat()] = entry
+
+        all_entries = sorted(combined.values(), key=lambda x: x["_ts_utc"])
+
+        if self.debug:
+            print(f"[DEBUG] Total merged entries: {len(all_entries)}")
+
+        cutoff = now_utc - dt.timedelta(hours=hours)
+
+        recent_entries = [
+            x for x in all_entries
+            if cutoff <= x["_ts_utc"] <= now_utc
+        ]
+
+        if not include_estimated:
+            recent_entries = [
+                x for x in recent_entries
+                if not x["estimated"]
+            ]
+
+        if self.debug:
+            print(f"[DEBUG] Returning {len(recent_entries)} entries")
+
+            if recent_entries:
+                print(f"[DEBUG] Oldest: {recent_entries[0]['dateTime']}")
+                print(f"[DEBUG] Newest: {recent_entries[-1]['dateTime']}")
+
+        for x in recent_entries:
+            x.pop("_ts", None)
+            x.pop("_ts_utc", None)
+
+        return recent_entries
+
+    def fetch_daily_data(self, start_date, end_date, include_estimated=False):
+        data = self.call_with_token_retry(
+            get_daily_usage,
+            self.meter_id,
+            start_date,
+            end_date,
+        )
+
+        entries = [normalize_daily_entry(entry) for entry in data]
+        entries = sorted(entries, key=lambda x: x.get("consDate", ""))
+
+        if not include_estimated:
+            entries = [
+                x for x in entries
+                if not x["estimated"]
+            ]
+
+        return entries
+
+
+def fetch_data(username, password, hours=48, debug=False, include_estimated=False):
+    client = MyWaterAdvisorApi(username, password, debug=debug)
+    return client.fetch_hourly_data(
+        hours=hours,
+        include_estimated=include_estimated,
+    )
+
+
+def fetch_daily_data(
+    username,
+    password,
+    start_date,
+    end_date,
+    debug=False,
+    include_estimated=False,
+):
+    client = MyWaterAdvisorApi(username, password, debug=debug)
+    return client.fetch_daily_data(
+        start_date,
+        end_date,
+        include_estimated=include_estimated,
+    )
