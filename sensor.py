@@ -6,7 +6,9 @@ from homeassistant.components.sensor import (
 from homeassistant.const import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.core import callback
 import logging
+
 
 from .const import (
     CONF_ENABLE_DEBUG_SENSOR,
@@ -83,11 +85,13 @@ class MWADebugSensor(CoordinatorEntity, SensorEntity):
 
 
 class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
+
     def __init__(self, coordinator, entry):
         _LOGGER.debug("MWA sensor init called")
         _LOGGER.debug("MWA coordinator passed in: %s", coordinator)
         super().__init__(coordinator)
         _LOGGER.debug("MWA coordinator on self: %s", self.coordinator)
+
         self._attr_name = "mywateradvisor_Water_Usage_Total"
         self._attr_unique_id = f"{entry.entry_id}_mywateradvisor_water_total"
         self._attr_native_unit_of_measurement = "gal"
@@ -97,6 +101,7 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
 
         self._total = 0.0
         self._last_timestamp = None
+
         self._max_reasonable_hourly_cons = entry.options.get(
             CONF_MAX_REASONABLE_HOURLY_CONS,
             entry.data.get(
@@ -112,6 +117,17 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
             ),
         )
 
+
+    @callback
+    def _handle_coordinator_update(self):
+        data = self.coordinator.data
+
+        if data:
+            self._process_new_data(data)
+            self.hass.async_create_task(self._async_backfill_statistics())
+
+        super()._handle_coordinator_update()
+
     @property
     def native_value(self):
         return round(self._total, 2)
@@ -123,6 +139,7 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
             "max_reasonable_hourly_cons": self._max_reasonable_hourly_cons,
             "skip_negative_corrections": self._skip_negative_corrections,
         }
+
 
     def _skip_reason(self, entry):
         val = float(entry.get("cons", 0) or 0)
@@ -144,6 +161,7 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
             return api_anomaly_reason
 
         return None
+
 
     def _process_new_data(self, data):
         if not data:
@@ -242,6 +260,8 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
         self._process_new_data(self.coordinator.data)
         self.async_write_ha_state()
 
+
     def _handle_coordinator_update(self):
         self._process_new_data(self.coordinator.data)
         super()._handle_coordinator_update()
+
