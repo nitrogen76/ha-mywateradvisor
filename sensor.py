@@ -5,7 +5,10 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.core import callback
 import logging
+
+from .recorder import async_import_bucket_statistics
 
 _LOGGER = logging.getLogger(__name__)
 CONF_ENABLE_DEBUG_SENSOR = "enable_debug_sensor"
@@ -43,10 +46,7 @@ class MWADebugSensor(CoordinatorEntity, SensorEntity):
 
 class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
     def __init__(self, coordinator):
-        _LOGGER.warning("MWA SENSOR INIT CALLED")
-        _LOGGER.warning("MWA COORDINATOR PASSED IN: %s", coordinator)
         super().__init__(coordinator)
-        _LOGGER.warning("MWA COORDINATOR ON SELF: %s", self.coordinator)
         self._attr_name = "mywateradvisor_Water_Usage_Total"
         self._attr_unique_id = "mywateradvisor_water_total"  # bump for clean start
         self._attr_native_unit_of_measurement = "gal"
@@ -55,6 +55,7 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
 
         self._total = 0.0
         self._last_timestamp = None
+        self._statistics_import_running = False
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
@@ -78,7 +79,18 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
             self._total,
             self._last_timestamp,
         )
+        await self._async_backfill_statistics()
         self.async_write_ha_state()       
+
+    @callback
+    def _handle_coordinator_update(self):
+        data = self.coordinator.data
+
+        if data:
+            self._process_new_data(data)
+            self.hass.async_create_task(self._async_backfill_statistics())
+
+        super()._handle_coordinator_update()
 
     @property
     def native_value(self):
@@ -94,6 +106,27 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
         return {
             "last_timestamp": self._last_timestamp
         }
+
+    async def _async_backfill_statistics(self):
+        if self._statistics_import_running:
+            return
+
+        data = self.coordinator.data
+        if not data or not self.entity_id:
+            return
+
+        self._statistics_import_running = True
+        try:
+            await async_import_bucket_statistics(
+                self.hass,
+                self.entity_id,
+                self.name,
+                data,
+            )
+        except Exception:
+            _LOGGER.exception("MWA STATS: failed to import bucket history")
+        finally:
+            self._statistics_import_running = False
 
     def _process_new_data(self, data):
         if not data:
@@ -163,3 +196,4 @@ class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
             return
 
         self._process_new_data(data)
+        await self._async_backfill_statistics()
