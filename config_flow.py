@@ -37,7 +37,7 @@ class MyWaterAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        return MyWaterAdvisorOptionsFlow()
+        return MyWaterAdvisorOptionsFlow(config_entry)
 
     async def async_step_user(self, user_input=None):
         if user_input is not None:
@@ -63,11 +63,24 @@ class MyWaterAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 },
             )
 
-        schema = vol.Schema({
-            vol.Required("username"): str,
-            vol.Required("password"): str,
-            **OPTIONS_SCHEMA.schema,
-        })
+        schema = vol.Schema(
+            {
+                vol.Required("username"): str,
+                vol.Required("password"): str,
+                vol.Optional(
+                    CONF_ENABLE_DEBUG_SENSOR,
+                    default=DEFAULT_ENABLE_DEBUG_SENSOR,
+                ): bool,
+                vol.Optional(
+                    CONF_MAX_REASONABLE_HOURLY_CONS,
+                    default=DEFAULT_MAX_REASONABLE_HOURLY_CONS,
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                vol.Optional(
+                    CONF_SKIP_NEGATIVE_CORRECTIONS,
+                    default=DEFAULT_SKIP_NEGATIVE_CORRECTIONS,
+                ): bool,
+            }
+        )
 
         return self.async_show_form(
             step_id="user",
@@ -75,29 +88,33 @@ class MyWaterAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
 
-class MyWaterAdvisorOptionsFlow(config_entries.OptionsFlowWithReload):
+class MyWaterAdvisorOptionsFlow(config_entries.OptionsFlow):
+    def __init__(self, config_entry):
+        self._config_entry = config_entry
+
     async def async_step_init(self, user_input=None):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
+        config_entry = getattr(self, "config_entry", self._config_entry)
         suggested_values = {
-            CONF_ENABLE_DEBUG_SENSOR: self.config_entry.options.get(
+            CONF_ENABLE_DEBUG_SENSOR: config_entry.options.get(
                 CONF_ENABLE_DEBUG_SENSOR,
-                self.config_entry.data.get(
+                config_entry.data.get(
                     CONF_ENABLE_DEBUG_SENSOR,
                     DEFAULT_ENABLE_DEBUG_SENSOR,
                 ),
             ),
-            CONF_MAX_REASONABLE_HOURLY_CONS: self.config_entry.options.get(
+            CONF_MAX_REASONABLE_HOURLY_CONS: config_entry.options.get(
                 CONF_MAX_REASONABLE_HOURLY_CONS,
-                self.config_entry.data.get(
+                config_entry.data.get(
                     CONF_MAX_REASONABLE_HOURLY_CONS,
                     DEFAULT_MAX_REASONABLE_HOURLY_CONS,
                 ),
             ),
-            CONF_SKIP_NEGATIVE_CORRECTIONS: self.config_entry.options.get(
+            CONF_SKIP_NEGATIVE_CORRECTIONS: config_entry.options.get(
                 CONF_SKIP_NEGATIVE_CORRECTIONS,
-                self.config_entry.data.get(
+                config_entry.data.get(
                     CONF_SKIP_NEGATIVE_CORRECTIONS,
                     DEFAULT_SKIP_NEGATIVE_CORRECTIONS,
                 ),
