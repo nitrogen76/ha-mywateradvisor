@@ -22,6 +22,12 @@ Returns meter list.
 
 Returns hourly consumption data.
 
+### GET /consumption/daily/{meter_id}/{start}/{end}
+
+Returns daily consumption data.
+
+Dates use `MM-DD-YYYY` format, e.g. `05-01-2026`.
+
 ## Data Fields
 
 -   dateTime: ISO timestamp (UTC)
@@ -29,6 +35,9 @@ Returns hourly consumption data.
 -   estimationType:
     -   0 = real
     -   non-zero = estimated
+-   estimated: boolean added by this integration
+-   anomaly: boolean added by this integration for negative corrections and high outliers
+-   anomaly_reason: currently `negative_correction` or `high_outlier`
 
 ## Notes
 
@@ -37,6 +46,7 @@ Returns hourly consumption data.
 -   Buckets are hour ENDING. e.g. 12:00 are for the hour that ENDS at 12:00
 -   Buckets are not exact, because meter reading in a mesh network is done in batches, and would overwhelm the mesh if all done at once.  Therefore a bucket labeled 12:00 might have ended as early as 11:45.  Don't expect the bucket timing to be exact.  
 -   The usage reported is only as good as your meter.  Ours is ultrasonic, so it's very exact.  Your milage may vary.
+-   The portal can publish large positive usage spikes and later back them out with negative correction rows.  This integration marks negative hourly values and hourly values over 2000 gallons as anomalies so they are not added to Home Assistant's total-increasing sensor.
 -   This was all reverse engineered.  If you find different behavior, or find new behavior, please let me know!
 
 ## Assumptions
