@@ -1,36 +1,34 @@
+"""Sensor platform for the MyWaterAdvisor integration.
+
+The API now exposes one cumulative reading for the current UTC month. Home
+Assistant derives consumption from successive increases in that value, so this
+platform deliberately does not reconstruct hourly buckets.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
 from homeassistant.components.sensor import (
-    SensorEntity,
     SensorDeviceClass,
+    SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import EntityCategory
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.const import EntityCategory, UnitOfVolume
 from homeassistant.core import callback
-import logging
+from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-
-from .const import (
-    CONF_ENABLE_DEBUG_SENSOR,
-    CONF_MAX_REASONABLE_HOURLY_CONS,
-    CONF_SKIP_NEGATIVE_CORRECTIONS,
-    DEFAULT_ENABLE_DEBUG_SENSOR,
-    DEFAULT_MAX_REASONABLE_HOURLY_CONS,
-    DEFAULT_SKIP_NEGATIVE_CORRECTIONS,
-    DOMAIN,
-)
+from .const import CONF_ENABLE_DEBUG_SENSOR, DEFAULT_ENABLE_DEBUG_SENSOR, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# Home Assistant total-increasing safety knobs.
-# Set max_reasonable_hourly_cons to 0 in config to allow any positive hourly value.
-# Set skip_negative_corrections to False to allow negative correction rows through
-# the skip check, though they still will not be added to the increasing total.
 
-
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(hass, entry, async_add_entities) -> None:
+    """Set up MyWaterAdvisor sensors from a config entry."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    entities = [MWAEnergyTotalSensor(coordinator, entry)]
+    entities: list[SensorEntity] = [MWAWaterUsageTotalSensor(coordinator, entry)]
 
     if entry.options.get(
         CONF_ENABLE_DEBUG_SENSOR,
@@ -38,9 +36,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
     ):
         entities.append(MWADebugSensor(coordinator, entry))
 
-    async_add_entities(entities, True)
+    async_add_entities(entities)
 
-def device_info(entry):
+
+def device_info(entry) -> dict[str, Any]:
+    """Return device metadata shared by all entities."""
     return {
         "identifiers": {(DOMAIN, entry.entry_id)},
         "name": "MyWaterAdvisor",
@@ -49,219 +49,135 @@ def device_info(entry):
 
 
 class MWADebugSensor(CoordinatorEntity, SensorEntity):
-    def __init__(self, coordinator, entry):
+    """Diagnostic view of the raw cumulative value returned by the coordinator."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:water-check"
+
+    def __init__(self, coordinator, entry) -> None:
         super().__init__(coordinator)
-        self._attr_name = "MWA Debug Buckets"
-        self._attr_unique_id = f"{entry.entry_id}_mwa_debug_buckets"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_name = "MWA Debug Monthly Reading"
+        self._attr_unique_id = f"{entry.entry_id}_mwa_debug_monthly_reading"
         self._attr_device_info = device_info(entry)
 
     @property
-    def native_value(self):
-        data = self.coordinator.data or []
-        return len(data)
+    def native_value(self) -> float | None:
+        """Return the coordinator's raw monthly reading."""
+        value = self.coordinator.data
+        if value is None:
+            return None
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     @property
-    def extra_state_attributes(self):
-        data = self.coordinator.data or []
-        anomalies = [entry for entry in data if entry.get("anomaly")]
-        estimated = [entry for entry in data if entry.get("estimated")]
-
-        attrs = {
-            "estimated_count": len(estimated),
-            "anomaly_count": len(anomalies),
-            "anomaly_reasons": sorted({
-                entry.get("anomaly_reason", "anomaly")
-                for entry in anomalies
-            }),
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose basic coordinator diagnostics."""
+        return {
+            "last_update_success": self.coordinator.last_update_success,
+            "raw_value": self.coordinator.data,
         }
 
-        if data:
-            sorted_data = sorted(data, key=lambda x: x["dateTime"])
-            attrs["oldest_timestamp"] = sorted_data[0]["dateTime"]
-            attrs["newest_timestamp"] = sorted_data[-1]["dateTime"]
 
-        return attrs
+class MWAWaterUsageTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
+    """Current-month cumulative water consumption."""
 
+    _attr_native_unit_of_measurement = UnitOfVolume.GALLONS
+    _attr_device_class = SensorDeviceClass.WATER
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:water"
 
-class MWAEnergyTotalSensor(CoordinatorEntity, SensorEntity, RestoreEntity):
-
-    def __init__(self, coordinator, entry):
-        _LOGGER.debug("MWA sensor init called")
-        _LOGGER.debug("MWA coordinator passed in: %s", coordinator)
+    def __init__(self, coordinator, entry) -> None:
         super().__init__(coordinator)
-        _LOGGER.debug("MWA coordinator on self: %s", self.coordinator)
 
+        # Preserve the old name and unique ID so the existing entity should keep
+        # its registry identity, dashboards, history, and automations.
         self._attr_name = "mywateradvisor_Water_Usage_Total"
         self._attr_unique_id = f"{entry.entry_id}_mywateradvisor_water_total"
-        self._attr_native_unit_of_measurement = "gal"
-        self._attr_device_class = SensorDeviceClass.WATER
-        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
         self._attr_device_info = device_info(entry)
 
-        self._total = 0.0
-        self._last_timestamp = None
-
-        self._max_reasonable_hourly_cons = entry.options.get(
-            CONF_MAX_REASONABLE_HOURLY_CONS,
-            entry.data.get(
-                CONF_MAX_REASONABLE_HOURLY_CONS,
-                DEFAULT_MAX_REASONABLE_HOURLY_CONS,
-            ),
-        )
-        self._skip_negative_corrections = entry.options.get(
-            CONF_SKIP_NEGATIVE_CORRECTIONS,
-            entry.data.get(
-                CONF_SKIP_NEGATIVE_CORRECTIONS,
-                DEFAULT_SKIP_NEGATIVE_CORRECTIONS,
-            ),
-        )
-
-
-    @callback
-    def _handle_coordinator_update(self):
-        data = self.coordinator.data
-
-        if data:
-            self._process_new_data(data)
-            self.hass.async_create_task(self._async_backfill_statistics())
-
-        super()._handle_coordinator_update()
+        self._value: float | None = None
 
     @property
-    def native_value(self):
-        return round(self._total, 2)
+    def native_value(self) -> float | None:
+        """Return the last valid cumulative monthly reading."""
+        return self._value
 
     @property
-    def extra_state_attributes(self):
+    def available(self) -> bool:
+        """Remain available when a zero reading was intentionally ignored.
+
+        A failed coordinator refresh is still reported unavailable. An explicit
+        zero from the API becomes ``None`` in api.py and leaves the last valid
+        value untouched.
+        """
+        return self.coordinator.last_update_success and self._value is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the source model for troubleshooting."""
         return {
-            "last_timestamp": self._last_timestamp,
-            "max_reasonable_hourly_cons": self._max_reasonable_hourly_cons,
-            "skip_negative_corrections": self._skip_negative_corrections,
+            "source": "current_utc_month_cumulative",
+            "zero_readings_ignored": True,
         }
 
+    def _process_new_data(self, value: Any) -> None:
+        """Accept one valid positive cumulative reading.
 
-    def _skip_reason(self, entry):
-        val = float(entry.get("cons", 0) or 0)
-        api_anomaly_reason = entry.get("anomaly_reason")
-
-        if (
-            self._skip_negative_corrections
-            and (val < 0 or api_anomaly_reason == "negative_correction")
-        ):
-            return "negative_correction"
-
-        if (
-            self._max_reasonable_hourly_cons
-            and val > self._max_reasonable_hourly_cons
-        ):
-            return "high_outlier"
-
-        if api_anomaly_reason and api_anomaly_reason != "high_outlier":
-            return api_anomaly_reason
-
-        return None
-
-
-    def _process_new_data(self, data):
-        if not data:
+        ``None`` means api.py deliberately ignored a zero response, so retain
+        the previous value rather than creating a false reset in statistics.
+        """
+        if value is None:
+            _LOGGER.debug(
+                "MWA monthly reading was None; retaining previous value %s",
+                self._value,
+            )
             return
 
-        entries = data or []
-
-        # filter real entries only
-        entries = [e for e in entries if not e.get("estimated")]
-
-        # sort oldest → newest
-        entries = sorted(entries, key=lambda x: x["dateTime"])
-
-        # FIRST RUN: baseline only (NO additions)
-        if self._last_timestamp is None:
-            if entries:
-                self._last_timestamp = entries[-1]["dateTime"]
-                _LOGGER.debug(
-                    "MWA INIT: baseline set to %s",
-                    self._last_timestamp,
-                )
+        try:
+            new_value = round(float(value), 1)
+        except (TypeError, ValueError):
+            _LOGGER.warning(
+                "Invalid MyWaterAdvisor monthly reading %r; retaining %s",
+                value,
+                self._value,
+            )
             return
 
-        # normal processing
-        from datetime import datetime
+        if new_value <= 0:
+            _LOGGER.warning(
+                "Non-positive MyWaterAdvisor monthly reading %s ignored; "
+                "retaining %s",
+                new_value,
+                self._value,
+            )
+            return
 
-        for entry in entries:
-            ts_str = entry["dateTime"]
-            ts = datetime.fromisoformat(ts_str)
-            last_ts = datetime.fromisoformat(self._last_timestamp)
+        self._value = new_value
 
-            val = float(entry.get("cons", 0) or 0)
-
-            if ts > last_ts:
-                skip_reason = self._skip_reason(entry)
-
-                if skip_reason:
-                    _LOGGER.warning(
-                        "MWA SKIP: ts=%s cons=%s reason=%s total=%s",
-                        ts_str,
-                        val,
-                        skip_reason,
-                        self._total,
-                    )
-                    self._last_timestamp = ts_str
-                    continue
-
-                new_total = self._total
-
-                if val > 0:
-                    new_total = round(self._total + val, 2)
-
-                    # monotonic safety guard
-                    if new_total < self._total:
-                        _LOGGER.warning(
-                            "MWA IGNORE: decreasing total (%s -> %s)",
-                            self._total,
-                            new_total,
-                        )
-                    else:
-                        self._total = new_total
-
-                _LOGGER.debug(
-                    "MWA ADD: ts=%s added=%s total=%s",
-                    ts_str,
-                    val,
-                    self._total,
-                )
-
-                # advance cursor immediately
-                self._last_timestamp = ts_str
-
-    async def async_added_to_hass(self):
-        await super().async_added_to_hass()
-
-        last_state = await self.async_get_last_state()
-        if last_state:
-            try:
-                if last_state.state not in (None, "unknown", "unavailable"):
-                    self._total = float(last_state.state)
-            except ValueError:
-                self._total = 0.0
-
-            restored_ts = last_state.attributes.get("last_timestamp")
-
-            # only restore if we actually have one
-            if restored_ts:
-                self._last_timestamp = restored_ts
-
-        _LOGGER.debug(
-            "MWA RESTORE: total=%s last_timestamp=%s",
-            self._total,
-            self._last_timestamp,
-        )
-
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Process a coordinator refresh."""
         self._process_new_data(self.coordinator.data)
         self.async_write_ha_state()
 
+    async def async_added_to_hass(self) -> None:
+        """Restore the last valid reading, then apply current coordinator data."""
+        await super().async_added_to_hass()
 
-    def _handle_coordinator_update(self):
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state not in (None, "unknown", "unavailable"):
+            try:
+                restored = float(last_state.state)
+                if restored > 0:
+                    self._value = round(restored, 1)
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "Unable to restore MyWaterAdvisor state %r",
+                    last_state.state,
+                )
+
         self._process_new_data(self.coordinator.data)
-        super()._handle_coordinator_update()
-
+        self.async_write_ha_state()
