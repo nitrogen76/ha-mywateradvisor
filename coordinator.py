@@ -38,7 +38,9 @@ class MyWaterAdvisorDataUpdateCoordinator(DataUpdateCoordinator):
                                     DEFAULT_SKIP_NEGATIVE_CORRECTIONS)
         # A timezone change must not mix two interpretations of historical hours.
         zone_key = hashlib.sha256(str(self.time_zone).encode()).hexdigest()[:8]
-        self.statistic_id = f"{DOMAIN}:{entry.entry_id}_hourly_{self.time_raw_mode}_{zone_key}"
+        # Modern HA entry IDs are uppercase ULIDs; statistics IDs require slugs.
+        entry_key = entry.entry_id.lower()
+        self.statistic_id = f"{DOMAIN}:{entry_key}_hourly_{self.time_raw_mode}_{zone_key}"
         self.statistics = HourlyStatistics(hass, self.statistic_id)
         self._client = None
 

@@ -8,6 +8,7 @@ import datetime as dt
 import importlib.util
 from pathlib import Path
 import sys
+import re
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -124,6 +125,9 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
             async def async_load(self): return saved.get(self.key)
             async def async_save(self, data): saved[self.key] = data
         def add(hass, metadata, rows):
+            # Mirror HA's external-statistics ID validation at the service boundary.
+            if not re.fullmatch(r'(?!.*__)(?!_)[0-9a-z_]+(?<!_):(?!_)[0-9a-z_]+(?<!_)', metadata['statistic_id']):
+                raise ValueError('Invalid statistic_id')
             imports.append((metadata, rows))
             for record in rows:
                 database[(metadata['statistic_id'], record['start'])] = record
@@ -207,7 +211,7 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
         async def executor(function): return function()
         self.hass.config = SimpleNamespace(time_zone='America/Chicago')
         self.hass.async_add_executor_job = executor
-        entry = SimpleNamespace(entry_id='test', options={}, data={'username':'test','password':'test'})
+        entry = SimpleNamespace(entry_id='01K7J7R3QAP5JZ4E9WRQ6GM2FA', options={}, data={'username':'test','password':'test'})
         coordinator = MyWaterAdvisorDataUpdateCoordinator(self.hass, entry)
         calls = []
         def fetch(start, end):
@@ -221,7 +225,8 @@ class ImportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first['total'], 432.7)
         self.assertEqual(first['total'], second['total'])
         self.assertEqual(first['fetched_buckets'], 5)
-        self.assertTrue(first['statistic_id'].startswith('mywateradvisor:'))
+        self.assertTrue(first['statistic_id'].startswith('mywateradvisor:01k7j7r3qap5jz4e9wrq6gm2fa_'))
+        self.assertEqual(first['statistic_id'], first['statistic_id'].lower())
         coordinator.statistics.last_success = NOW - dt.timedelta(days=20)
         with patch.object(module, 'dt', SimpleNamespace(datetime=Clock, timedelta=dt.timedelta, timezone=dt.timezone)):
             await coordinator._async_update_data()
