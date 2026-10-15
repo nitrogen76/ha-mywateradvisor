@@ -1,191 +1,160 @@
+"""Import hour-ending utility readings as external hourly statistics.
+
+The saved ledger is authoritative for this series. Rebuild running sums from it
+so re-fetches, late readings and changed readings never increment a total twice.
+"""
+
 import datetime as dt
+from decimal import Decimal, InvalidOperation
 import logging
 
-from .api import TIME_RAW_MODE
+from .const import DOMAIN, STORAGE_VERSION
 
 _LOGGER = logging.getLogger(__name__)
+_HOUR = dt.timedelta(hours=1)
 
 
-def _bucket_start(entry):
-    raw = entry.get("dateTime")
-    if not raw:
-        return None
-
-    try:
-        timestamp = dt.datetime.fromisoformat(raw)
-    except ValueError:
-        _LOGGER.warning("MWA STATS: invalid bucket timestamp %s", raw)
-        return None
-
+def _bucket_start(entry, time_raw_mode="utc", local_timezone=None):
+    """Translate the utility's hour END to HA's UTC hour START."""
+    if time_raw_mode not in ("utc", "local"):
+        raise ValueError(f"Invalid time mode: {time_raw_mode}")
+    timestamp = dt.datetime.fromisoformat(entry["dateTime"])
     if timestamp.tzinfo is None:
-        if TIME_RAW_MODE == "utc":
-            timestamp = timestamp.replace(tzinfo=dt.timezone.utc)
-        elif TIME_RAW_MODE == "local":
-            timestamp = timestamp.replace(
-                tzinfo=dt.datetime.now().astimezone().tzinfo
-            )
-        else:
-            raise ValueError(f"Invalid TIME_RAW_MODE: {TIME_RAW_MODE}")
-
-    return timestamp.astimezone(dt.timezone.utc).replace(
-        minute=0,
-        second=0,
-        microsecond=0,
-    )
+        timezone = dt.timezone.utc if time_raw_mode == "utc" else local_timezone
+        if timezone is None:
+            raise ValueError("Local timestamps require a configured timezone")
+        timestamp = timestamp.replace(tzinfo=timezone)
+        if time_raw_mode == "local" and (
+            timestamp.replace(fold=0).utcoffset() != timestamp.replace(fold=1).utcoffset()
+        ):
+            raise ValueError("Ambiguous or nonexistent local hour requires an explicit offset")
+    timestamp = timestamp.astimezone(dt.timezone.utc)
+    if timestamp.minute or timestamp.second or timestamp.microsecond:
+        raise ValueError("Bucket timestamp is not aligned to a UTC hour")
+    return timestamp - _HOUR
 
 
-def _hourly_buckets(data):
+def _hourly_buckets(
+    data, *, now, earliest, time_raw_mode="utc", local_timezone=None,
+    max_reasonable=2000.0, skip_negative=True,
+):
+    """Return validated, completed, real buckets keyed by UTC start.
+
+    Repeated timestamps describe the same bucket; the last real row wins.
+    Missing/invalid/estimated rows do not erase a previously stored real bucket.
+    Rejected numeric outliers explicitly replace a previously accepted value
+    with zero, which also corrects the running sums downstream.
+    """
     buckets = {}
-
-    for entry in data or []:
-        if entry.get("estimated"):
+    for entry in data:
+        if entry.get("estimated", False) or entry.get("estimationType", 0) not in (
+            0, "0", None,
+        ):
             continue
-
-        start = _bucket_start(entry)
-        if start is None:
-            continue
-
         try:
-            consumption = float(entry.get("cons", 0) or 0)
-        except (TypeError, ValueError):
-            _LOGGER.warning(
-                "MWA STATS: invalid consumption for %s: %s",
-                entry.get("dateTime"),
-                entry.get("cons"),
-            )
+            start = _bucket_start(entry, time_raw_mode, local_timezone)
+            consumption = Decimal(str(entry["cons"]))
+            if not consumption.is_finite():
+                raise ValueError("Consumption is not finite")
+        except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+            _LOGGER.warning("Skipping invalid hourly reading %s: %s", entry, exc)
             continue
-
-        buckets[start] = round(buckets.get(start, 0.0) + max(consumption, 0.0), 2)
-
-    return [(start, buckets[start]) for start in sorted(buckets)]
-
-
-def _last_stat_values(last_stats, statistic_id):
-    if not last_stats or statistic_id not in last_stats:
-        return None, 0.0
-
-    latest = last_stats[statistic_id][0]
-    last_start = latest.get("start")
-    last_sum = latest.get("sum")
-
-    return last_start, float(last_sum or 0.0)
+        if start < earliest or start + _HOUR > now:
+            continue
+        if (skip_negative and consumption < 0) or (
+            max_reasonable > 0 and consumption > Decimal(str(max_reasonable))
+        ):
+            _LOGGER.warning("Recording rejected hourly value %s at %s as zero", consumption, start)
+            consumption = Decimal(0)
+        buckets[start.isoformat()] = float(consumption.quantize(Decimal("0.01")))
+    return buckets
 
 
-def _as_timestamp(value):
-    if isinstance(value, dt.datetime):
-        return value.timestamp()
+def _statistics_from_ledger(buckets, import_from=None):
+    """Build cumulative rows, including a zero baseline before the first hour.
 
-    return float(value)
-
-
-def _baseline_sum(records, buckets, fallback_start, fallback_sum):
-    bucket_totals = {}
-    running_bucket_total = 0.0
-
-    for start, consumption in buckets:
-        running_bucket_total = round(running_bucket_total + consumption, 2)
-        bucket_totals[start.timestamp()] = running_bucket_total
-
-    for record in sorted(records, key=lambda item: _as_timestamp(item["start"])):
-        start_ts = _as_timestamp(record["start"])
-        if start_ts in bucket_totals and record.get("sum") is not None:
-            return round(float(record["sum"]) - bucket_totals[start_ts], 2)
-
-    if fallback_start is not None:
-        first_start = buckets[0][0].timestamp()
-        if _as_timestamp(fallback_start) < first_start:
-            return fallback_sum
-
-    return 0.0
-
-
-def _metadata(StatisticMetaData, StatisticMeanType, statistic_id, name, unit_class):
-    kwargs = {
-        "has_sum": True,
-        "name": name,
-        "source": "recorder",
-        "statistic_id": statistic_id,
-        "unit_class": unit_class,
-        "unit_of_measurement": "gal",
-    }
-
-    if StatisticMeanType is None:
-        kwargs["has_mean"] = False
-    else:
-        kwargs["mean_type"] = StatisticMeanType.NONE
-
-    return StatisticMetaData(**kwargs)
-
-
-async def async_import_bucket_statistics(hass, statistic_id, name, data):
-    buckets = _hourly_buckets(data)
+    Empty hours between known buckets carry the total forward. They may be
+    replaced by delayed real readings on a subsequent poll.
+    """
     if not buckets:
-        _LOGGER.debug("MWA STATS: no real buckets to import")
-        return 0
-
-    from homeassistant.components.recorder import get_instance
-    from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
-    from homeassistant.components.recorder.statistics import (
-        async_import_statistics,
-        get_last_statistics,
-        statistics_during_period,
-    )
-    from homeassistant.util.unit_conversion import VolumeConverter
-
-    try:
-        from homeassistant.components.recorder.models import StatisticMeanType
-    except ImportError:
-        StatisticMeanType = None
-
-    last_stats = await get_instance(hass).async_add_executor_job(
-        get_last_statistics,
-        hass,
-        1,
-        statistic_id,
-        True,
-        {"sum"},
-    )
-    last_start, running_sum = _last_stat_values(last_stats, statistic_id)
-    period_stats = await get_instance(hass).async_add_executor_job(
-        statistics_during_period,
-        hass,
-        buckets[0][0],
-        None,
-        {statistic_id},
-        "hour",
-        None,
-        {"sum"},
-    )
-    existing_records = period_stats.get(statistic_id, []) if period_stats else []
-    running_sum = _baseline_sum(existing_records, buckets, last_start, running_sum)
-
+        return []
+    first = dt.datetime.fromisoformat(min(buckets))
+    last = dt.datetime.fromisoformat(max(buckets))
+    start = first - _HOUR
+    total = Decimal(0)
     statistics = []
-    for start, consumption in buckets:
-        running_sum = round(running_sum + consumption, 2)
-        statistics.append(
-            StatisticData(
-                start=start,
-                state=running_sum,
-                sum=running_sum,
-            )
+    while start <= last:
+        total += Decimal(str(buckets.get(start.isoformat(), 0)))
+        if import_from is None or start >= import_from:
+            statistics.append({"start": start, "state": float(total), "sum": float(total)})
+        start += _HOUR
+    return statistics
+
+
+class HourlyStatistics:
+    """Persist buckets and publish a separate, integration-owned series."""
+
+    def __init__(self, hass, statistic_id):
+        from homeassistant.helpers.storage import Store
+
+        self.hass = hass
+        self.statistic_id = statistic_id
+        self._store = Store(hass, STORAGE_VERSION, statistic_id.replace(":", "."))
+        self.buckets = {}
+        self.last_success = None
+        self._loaded = False
+
+    async def async_load(self):
+        if self._loaded:
+            return
+        saved = await self._store.async_load() or {}
+        self.buckets = saved.get("buckets", {})
+        raw = saved.get("last_success")
+        self.last_success = dt.datetime.fromisoformat(raw) if raw else None
+        self._loaded = True
+
+    async def async_update(self, buckets, now, replay_from):
+        from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
+        from homeassistant.components.recorder.statistics import async_add_external_statistics
+        from homeassistant.util.unit_conversion import VolumeConverter
+
+        merged = {**self.buckets, **buckets}
+        if not merged:
+            return 0
+        # Replay the overlap even if unchanged: an interrupted recorder queue is
+        # recovered on restart. Corrections propagate through every later hour.
+        changed = [dt.datetime.fromisoformat(key) for key, value in buckets.items()
+                   if key not in self.buckets or self.buckets[key] != value]
+        import_from = min([replay_from, *changed])
+        if not self.buckets:
+            import_from = None  # Include the initial zero baseline.
+        first = dt.datetime.fromisoformat(min(merged))
+        if import_from is not None and import_from <= first:
+            import_from = first - _HOUR
+        rows = _statistics_from_ledger(merged, import_from)
+        metadata = {
+            "has_sum": True,
+            "name": "MyWaterAdvisor Hourly Water Consumption",
+            "source": DOMAIN,
+            "statistic_id": self.statistic_id,
+            "unit_class": VolumeConverter.UNIT_CLASS,
+            "unit_of_measurement": "gal",
+        }
+        try:
+            from homeassistant.components.recorder.models import StatisticMeanType
+        except ImportError:
+            metadata["has_mean"] = False
+        else:
+            metadata["mean_type"] = StatisticMeanType.NONE
+        async_add_external_statistics(
+            self.hass, StatisticMetaData(**metadata),
+            [StatisticData(**row) for row in rows],
         )
+        await self._store.async_save({"buckets": merged, "last_success": now.isoformat()})
+        self.buckets = merged
+        self.last_success = now
+        return len(rows)
 
-    if not statistics:
-        _LOGGER.debug("MWA STATS: no new buckets for %s", statistic_id)
-        return 0
-
-    metadata = _metadata(
-        StatisticMetaData,
-        StatisticMeanType,
-        statistic_id,
-        name,
-        VolumeConverter.UNIT_CLASS,
-    )
-
-    async_import_statistics(hass, metadata, statistics)
-    _LOGGER.info(
-        "MWA STATS: imported %s bucket(s) for %s",
-        len(statistics),
-        statistic_id,
-    )
-    return len(statistics)
+    @property
+    def total(self):
+        return float(sum((Decimal(str(value)) for value in self.buckets.values()), Decimal(0)))

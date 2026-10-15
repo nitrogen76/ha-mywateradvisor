@@ -1,7 +1,11 @@
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.core import callback
 
 from .const import (
+    CONF_TIME_RAW_MODE,
+    DEFAULT_TIME_RAW_MODE,
+    TIME_RAW_MODES,
     CONF_ENABLE_DEBUG_SENSOR,
     CONF_MAX_REASONABLE_HOURLY_CONS,
     CONF_SKIP_NEGATIVE_CORRECTIONS,
@@ -16,11 +20,15 @@ class MyWaterAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     @staticmethod
+    @callback
     def async_get_options_flow(config_entry):
         return MyWaterAdvisorOptionsFlow()
 
     async def async_step_user(self, user_input=None):
         if user_input is not None:
+            time_raw_mode = user_input.pop(
+                CONF_TIME_RAW_MODE, DEFAULT_TIME_RAW_MODE
+            )
             enable_debug_sensor = user_input.pop(
                 CONF_ENABLE_DEBUG_SENSOR,
                 DEFAULT_ENABLE_DEBUG_SENSOR,
@@ -37,6 +45,7 @@ class MyWaterAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 title="MyWaterAdvisor",
                 data=user_input,
                 options={
+                    CONF_TIME_RAW_MODE: time_raw_mode,
                     CONF_ENABLE_DEBUG_SENSOR: enable_debug_sensor,
                     CONF_MAX_REASONABLE_HOURLY_CONS: max_reasonable_hourly_cons,
                     CONF_SKIP_NEGATIVE_CORRECTIONS: skip_negative_corrections,
@@ -47,6 +56,9 @@ class MyWaterAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Required("username"): str,
                 vol.Required("password"): str,
+                vol.Optional(
+                    CONF_TIME_RAW_MODE, default=DEFAULT_TIME_RAW_MODE
+                ): vol.In(TIME_RAW_MODES),
                 vol.Optional(
                     CONF_ENABLE_DEBUG_SENSOR,
                     default=DEFAULT_ENABLE_DEBUG_SENSOR,
@@ -73,6 +85,10 @@ class MyWaterAdvisorOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
+        time_raw_mode = self.config_entry.options.get(
+            CONF_TIME_RAW_MODE,
+            self.config_entry.data.get(CONF_TIME_RAW_MODE, DEFAULT_TIME_RAW_MODE),
+        )
         enable_debug_sensor = self.config_entry.options.get(
             CONF_ENABLE_DEBUG_SENSOR,
             self.config_entry.data.get(
@@ -97,6 +113,9 @@ class MyWaterAdvisorOptionsFlow(config_entries.OptionsFlow):
 
         schema = vol.Schema(
             {
+                vol.Optional(
+                    CONF_TIME_RAW_MODE, default=time_raw_mode
+                ): vol.In(TIME_RAW_MODES),
                 vol.Optional(
                     CONF_ENABLE_DEBUG_SENSOR,
                     default=enable_debug_sensor,

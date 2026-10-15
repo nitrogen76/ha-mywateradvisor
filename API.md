@@ -26,7 +26,8 @@ Returns hourly consumption data.
 
 Returns daily consumption data.
 
-Dates use `MM-DD-YYYY` format, e.g. `05-01-2026`.
+The hourly client uses `YYYY-MM-DD` dates, matching the previous working
+hourly implementation. The daily endpoint uses `MM-DD-YYYY`.
 
 ## Data Fields
 
@@ -35,9 +36,10 @@ Dates use `MM-DD-YYYY` format, e.g. `05-01-2026`.
 -   estimationType:
     -   0 = real
     -   non-zero = estimated
--   estimated: boolean added by this integration
--   anomaly: boolean added by this integration for negative corrections and high outliers
--   anomaly_reason: currently `negative_correction` or `high_outlier`
+-   estimated: optional boolean accepted by the importer
+
+The importer validates raw rows, replaces repeated timestamps, excludes estimates
+and incomplete future hours, and applies the configured outlier/correction guards.
 
 ## Notes
 
@@ -46,7 +48,7 @@ Dates use `MM-DD-YYYY` format, e.g. `05-01-2026`.
 -   Buckets are hour ENDING. e.g. 12:00 are for the hour that ENDS at 12:00
 -   Buckets are not exact, because meter reading in a mesh network is done in batches, and would overwhelm the mesh if all done at once.  Therefore a bucket labeled 12:00 might have ended as early as 11:45.  Don't expect the bucket timing to be exact.  
 -   The usage reported is only as good as your meter.  Ours is ultrasonic, so it's very exact.  Your milage may vary.
--   The portal can publish large positive usage spikes and later back them out with negative correction rows.  This integration marks negative hourly values and hourly values over 2000 gallons as anomalies so they are not added to Home Assistant's total-increasing sensor.
+-   The portal can publish large positive usage spikes and later back them out with negative correction rows.  By default, negative hourly values and hourly values over 2000 gallons are recorded as zero. Both guards can be configured. Changed readings replace their hourly bucket and rebuild subsequent cumulative statistics; see README.md.
 -   This was all reverse engineered.  If you find different behavior, or find new behavior, please let me know!
 
 ## Assumptions
@@ -56,3 +58,10 @@ Dates use `MM-DD-YYYY` format, e.g. `05-01-2026`.
 ## Wishlist
 
 -   If someone knows a way to pull a actual meter read off the customer API portal that'd be awesome.  Much of the gunk in this is trying to turn the hourly bucket reads into a meter that home advisor can use.  If I can just get the meter reading and use that, it simplifies this immensely!
+
+## Hourly statistics
+
+Hour-ending API timestamps are converted to UTC and moved back one hour for
+Home Assistant statistics starts. The UTC/Local option controls timestamps that
+have no explicit offset. External hourly statistics feed the Energy dashboard;
+the ordinary sensor only displays the retained ledger total.

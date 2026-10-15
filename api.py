@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 
-"""Minimal MyWaterAdvisor API client for Home Assistant.
-
-The API's current monthly consumption value is treated as a cumulative meter.
-Home Assistant can calculate usage from the difference between successive values,
-so there is no need to retrieve or reconstruct hourly buckets.
-"""
+"""MyWaterAdvisor API client for hourly consumption and monthly diagnostics."""
 
 from __future__ import annotations
 
@@ -27,6 +22,9 @@ API_JS_URL = f"{PORTAL_URL}/static/js/api.js"
 
 # Known working fallback if the portal JavaScript cannot be retrieved or parsed.
 KNOWN_APP_ID = "3a869241-d476-40f6-a923-d789d63db11d"
+
+# Legacy hourly recorder timestamps without an offset are UTC.
+TIME_RAW_MODE = "utc"
 
 REQUEST_TIMEOUT = 15
 _APP_ID_CACHE: str | None = None
@@ -133,7 +131,7 @@ def _is_auth_error(exc: requests.HTTPError) -> bool:
 
 
 class MyWaterAdvisorApi:
-    """Small client exposing only the cumulative current-month consumption."""
+    """Authenticated client for utility consumption readings."""
 
     def __init__(self, username: str, password: str, debug: bool = False) -> None:
         self.username = username
@@ -183,8 +181,9 @@ class MyWaterAdvisorApi:
 
     def _request_json(self, method: str, url: str, **kwargs: Any) -> Any:
         """Make an authenticated request, retrying once after an auth failure."""
+        request_headers = dict(kwargs.pop("headers", {}))
         for attempt in range(2):
-            headers = dict(kwargs.pop("headers", {}))
+            headers = dict(request_headers)
             headers["x-access-token"] = self.token
 
             response = self.session.request(
@@ -234,19 +233,44 @@ class MyWaterAdvisorApi:
         self._meter_id = meter_id
         return meter_id
 
+    def fetch_hourly_data(
+        self,
+        start: dt.datetime,
+        end: dt.datetime,
+        time_zone: dt.tzinfo = dt.timezone.utc,
+    ) -> list[dict[str, Any]]:
+        """Fetch date ranges enclosing the requested interval.
+
+        Raw timestamps are hour-ending values. Conversion and validation happen
+        in the recorder, using the configured utility timezone.
+        """
+        first = (start.astimezone(time_zone).date() - dt.timedelta(days=1))
+        last = (end.astimezone(time_zone).date() + dt.timedelta(days=1))
+        url = (
+            f"{BASE_URL}/consumption/hourly/{self.meter_id}/"
+            f"{first.isoformat()}/{last.isoformat()}"
+        )
+        payload = self._request_json("GET", url, headers=_portal_headers())
+        if not isinstance(payload, list) or any(
+            not isinstance(row, dict) for row in payload
+        ):
+            raise InvalidConsumptionData("Hourly response was not a list of objects")
+        return payload
+
     def fetch_monthly_consumption(
         self,
         month: str | None = None,
+        time_zone: dt.tzinfo = dt.timezone.utc,
     ) -> float | None:
         """Return the cumulative consumption for one API month.
 
-        The API appears to roll its dates over on UTC, so the default month is
-        derived from the current UTC date. A zero value is deliberately ignored
+        The default month uses the configured utility timezone (UTC by default).
+        A zero value is deliberately ignored
         because it is indistinguishable from a temporary API/rollover failure.
 
         Returning ``None`` means the caller should retain its previous reading.
         """
-        requested_month = month or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
+        requested_month = month or dt.datetime.now(time_zone).strftime("%Y-%m")
 
         if not re.fullmatch(r"\d{4}-\d{2}", requested_month):
             raise ValueError(f"Invalid month {requested_month!r}; expected YYYY-MM")
@@ -306,20 +330,25 @@ def fetch_monthly_consumption(
     password: str,
     month: str | None = None,
     debug: bool = False,
+    time_zone: dt.tzinfo = dt.timezone.utc,
 ) -> float | None:
     client = MyWaterAdvisorApi(username, password, debug=debug)
-    return client.fetch_monthly_consumption(month=month)
+    return client.fetch_monthly_consumption(month=month, time_zone=time_zone)
 
 
-# Compatibility name for a simple integration rewrite. Unlike the former
-# implementation, this returns one cumulative float (or None), not hourly rows.
 def fetch_data(
     username: str,
     password: str,
+    hours: int = 168,
     debug: bool = False,
-) -> float | None:
-    return fetch_monthly_consumption(
-        username=username,
-        password=password,
-        debug=debug,
-    )
+    include_estimated: bool = False,
+    time_zone: dt.tzinfo = dt.timezone.utc,
+) -> list[dict[str, Any]]:
+    """Fetch hourly rows for standalone callers (the coordinator retains a client)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    client = MyWaterAdvisorApi(username, password, debug=debug)
+    rows = client.fetch_hourly_data(now - dt.timedelta(hours=hours), now, time_zone)
+    if include_estimated:
+        return rows
+    return [row for row in rows if row.get("estimationType", 0) in (0, "0", None)
+            and not row.get("estimated", False)]

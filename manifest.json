@@ -1,10 +1,17 @@
 {
   "domain": "mywateradvisor",
   "name": "MyWaterAdvisor API pull",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "documentation": "https://github.com/nitrogen76/ha-mywateradvisor",
-  "requirements": [],
-  "codeowners": ["@nitrogen76"],
+  "requirements": [
+    "requests>=2.32.3"
+  ],
+  "codeowners": [
+    "@nitrogen76"
+  ],
   "iot_class": "cloud_polling",
-  "config_flow": true
+  "config_flow": true,
+  "dependencies": [
+    "recorder"
+  ]
 }
